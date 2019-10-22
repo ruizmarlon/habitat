@@ -236,7 +236,14 @@ impl PackageInstall {
 
         // Only insert a PATH entry if the resulting path string is non-empty
         if !rooted_path.is_empty() {
-            env.insert(PATH_KEY.to_string(), rooted_path);
+            if cfg!(windows) {
+                let mut paths: Vec<PathBuf> = env::split_paths(&rooted_path).collect();
+                paths.append(&mut self.windows_system_paths());
+                let joined = env::join_paths(paths)?;
+                env.insert(PATH_KEY.to_string(), joined.to_string_lossy().to_string());
+            } else {
+                env.insert(PATH_KEY.to_string(), rooted_path);
+            }
         }
 
         // release 0.85.0 introduces the RUNTIME_ENVIRONMENT_PATHS metadata
@@ -443,6 +450,19 @@ impl PackageInstall {
             }
             Err(e) => Err(e),
         }
+    }
+
+    fn windows_system_paths(&self) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        if let Some(sys_root) = env::var_os("SystemRoot") {
+            let str_sys_root = sys_root.to_string_lossy().to_string();
+            paths.push(PathBuf::from(format!("{}{}", str_sys_root, "\\system32")));
+            paths.push(PathBuf::from(str_sys_root.clone()));
+            paths.push(PathBuf::from(format!("{}{}", str_sys_root, "\\system32\\wbem")));
+            paths.push(PathBuf::from(format!("{}{}",
+                                             str_sys_root, "\\system32\\WindowsPowerShell\\v1.0")));
+        }
+        paths
     }
 
     fn root_paths(&self, paths: &mut Vec<PathBuf>) -> Result<String> {
@@ -1414,20 +1434,22 @@ core/bar=pub:core/publish sub:core/subscribe
 
         let mut expected = BTreeMap::new();
         let fs_root_path = fs_root.into_path();
+        let mut paths = vec![fs::fs_rooted_path(&pkg_prefix_for(&pkg_install).join("bin"),
+                                                &fs_root_path),
+                             fs::fs_rooted_path(&pkg_prefix_for(&other_pkg_install).join("sbin"),
+                                                &fs_root_path),];
+        if cfg!(windows) {
+            paths.push(PathBuf::from("C:\\WINDOWS\\system32"));
+            paths.push(PathBuf::from("C:\\WINDOWS"));
+            paths.push(PathBuf::from("C:\\WINDOWS\\system32\\wbem"));
+            paths.push(PathBuf::from("C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0"));
+        }
         expected.insert("FOO".to_string(), "bar".to_string());
         expected.insert("JAVA_HOME".to_string(), "/my/java/home".to_string());
-        expected.insert(
-                        "PATH".to_string(),
-                        env::join_paths(vec![
-            fs::fs_rooted_path(&pkg_prefix_for(&pkg_install).join("bin"), &fs_root_path),
-            fs::fs_rooted_path(
-                &pkg_prefix_for(&other_pkg_install).join("sbin"),
-                &fs_root_path,
-            ),
-        ]).unwrap()
-                        .to_string_lossy()
-                        .into_owned(),
-        );
+        expected.insert("PATH".to_string(),
+                        env::join_paths(paths).unwrap()
+                                              .to_string_lossy()
+                                              .into_owned());
 
         assert_eq!(expected, pkg_install.environment_for_command().unwrap());
     }
